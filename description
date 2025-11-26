@@ -1,1 +1,221 @@
+# Load necessary libraries
+library(readxl)
+library(tidyverse)
+library(careless)
+library(psych)
+library(mclust)
+library(ggplot2)
+library(dplyr)
+library(proxy)
+library(stats)
+library(NbClust)
+library(factoextra)
+library(ggfortify)
+library(nFactors)
+library(GPArotation)
+library(glmnet)
 
+# ---------------------------
+# Load and inspect data
+# ---------------------------
+# Define filepath
+filepath <- file.path("~/Desktop", "rfiles", "example.xlsx")
+
+# Read Excel data
+gestation <- read_excel(filepath, sheet = 1, col_names = TRUE, col_types = "numeric")
+
+# View column names
+colnames(gestation)
+
+# ---------------------------
+# Summary statistics and basic plots
+# ---------------------------
+# Histogram of Age
+hist(gestation$age, main = "Histogram of Age", xlab = "Age")
+
+# Histogram of BMI
+hist(gestation$t1bmi, main = "Histogram of BMI", xlab = "BMI")
+
+# Histogram of Specific Gravity
+hist(gestation$sg, main = "Histogram of Specific Gravity", xlab = "Specific Gravity")
+
+# Barplots for categorical variables
+barplot(table(gestation$education), main = "Education Distribution", xlab = "Education", ylab = "Frequency")
+barplot(table(gestation$insurance), main = "Insurance Status Distribution", xlab = "Insurance", ylab = "Frequency")
+barplot(table(gestation$race), main = "Race Distribution", xlab = "Race", ylab = "Frequency")
+
+# ---------------------------
+# Clustering Exposure Variables
+# ---------------------------
+# Subset relevant columns
+data <- gestation[, 1:38]
+X <- data.matrix(data)
+
+# Fit Gaussian finite mixture model
+mod <- Mclust(X)
+
+# Summarize and visualize BIC values
+summary(mod$BIC)
+plot(mod, what = "BIC", ylim = range(mod$BIC[,-(1:2)], na.rm = TRUE))
+
+# Mclust summary and dimension reduction
+summary(mod)
+drmod <- MclustDR(mod, lambda = 1)
+summary(drmod)
+plot(drmod, what = "contour")
+plot(drmod, what = "boundaries", ngrid = 200)
+
+# Cluster assignments
+assignments <- predict(mod)$classification
+data_with_cluster <- cbind(as.data.frame(X), Cluster = assignments)
+fulldata_with_cluster <- cbind(as.data.frame(gestation), Cluster = assignments)
+
+# ---------------------------
+# Boxplots for toxicants
+# ---------------------------
+toxicants <- as.data.frame(gestation[, 1:38])
+
+plot_boxplots <- function(data, variables) {
+  plots <- list()
+  for (var in variables) {
+    plots[[var]] <- ggplot(data, aes(x = factor(Cluster), y = !!sym(var), fill = factor(Cluster))) +
+      geom_boxplot() +
+      labs(x = "Cluster", y = var, fill = "Cluster") +
+      theme_minimal()
+  }
+  return(plots)
+}
+
+toxicant_columns <- colnames(toxicants)
+plots <- plot_boxplots(fulldata_with_cluster, toxicant_columns)
+
+# Display boxplots
+for (i in 1:length(toxicant_columns)) {
+  print(plots[[i]])
+  cat("Press Enter to view the next plot:")
+  readline()
+}
+
+# Combined boxplot function
+plot_combined_boxplots <- function(data, predictors) {
+  data_long <- gather(data, key = "Predictor", value = "Value", all_of(predictors))
+  ggplot(data_long, aes(x = Predictor, y = Value, fill = factor(Cluster))) +
+    geom_boxplot() +
+    labs(x = "Predictor", y = "Value", fill = "Cluster") +
+    theme_minimal()
+}
+
+predictor_columns <- colnames(data_with_cluster)[1:38]
+combined_plots <- plot_combined_boxplots(data_with_cluster, predictor_columns)
+print(combined_plots)
+
+# ---------------------------
+# Toxic scores
+# ---------------------------
+toxscore <- gestation[, 39:42]
+clust <- cbind(as.data.frame(toxscore), Cluster = assignments)
+
+toxic_score_columns <- colnames(toxscore)
+score_plots <- plot_boxplots(clust, toxic_score_columns)
+
+for (i in 1:length(toxic_score_columns)) {
+  print(score_plots[[i]])
+  cat("Press Enter to view the next plot:")
+  readline()
+}
+
+# ---------------------------
+# Summary statistics by cluster
+# ---------------------------
+compute_summary <- function(data, variables) {
+  data %>%
+    group_by(Cluster) %>%
+    summarize(across(all_of(variables), list(mean = mean, sd = sd, min = min, max = max)))
+}
+
+variables <- c("t1bmi", "age", "sg")
+summary_stats <- compute_summary(fulldata_with_cluster, variables)
+print(summary_stats)
+
+# ---------------------------
+# Biological Pathways - PCA & Clustering
+# ---------------------------
+data2 <- gestation[, 43:103]
+datascale <- scale(data2)
+Y <- data.matrix(data2)
+
+# PCA
+pca_result <- prcomp(Y, scale. = TRUE)
+summary(pca_result)
+screeplot(pca_result, type = 'l', main = "Screeplot for Insurance Data")
+abline(1, 0, col = 'red', lty = 2)
+
+# PCA-based hierarchical clustering
+hclust_result <- hclust(dist(pca_result$x[,1:2]))
+num_clusters <- 24
+clusters <- cutree(hclust_result, num_clusters)
+points(pca_result$x[,1:2], col = clusters, pch = 16)
+
+# Add PCA scores & clusters to data
+data2$cluster <- clusters
+data2 <- cbind(data2, pca_result$x)
+
+# ---------------------------
+# K-means clustering
+# ---------------------------
+fviz_nbclust(datascale, kmeans, method = "wss") +
+  labs(subtitle = "Elbow Method")
+
+km_out <- kmeans(datascale, centers = 2, nstart = 200)
+print(km_out)
+
+# ---------------------------
+# Factor Analysis
+# ---------------------------
+set.seed(123)
+KMO(datascale)
+ev <- eigen(cor(datascale))
+x <- ev$values
+ns <- nScree(x)
+plot(ns)
+
+fit <- factanal(datascale, factors = 18, rotation = "Promax")
+loadings <- fit$loadings
+factor_scores <- as.matrix(datascale) %*% loadings
+data_with_scores <- cbind(gestation, factor_scores)
+
+# ---------------------------
+# Regression
+# ---------------------------
+data_with_cluster1 <- data_with_cluster
+data_with_cluster1$Cluster <- factor(data_with_cluster1$Cluster)
+
+model_without_inter <- lm(
+  Yhat ~ 0 + phthalate_ers + phenol_ers + pah_ers + metal_ers +
+    t1bmi + race + age + insurance + education + Cluster +
+    Factor1 + Factor2 + Factor3 + Factor4 + Factor5 + Factor6 +
+    Factor7 + Factor8 + Factor9 + Factor10 + Factor11 + Factor12 +
+    Factor13 + Factor14 + Factor15 + Factor16 + Factor17 + Factor18,
+  data = data_with_scores
+)
+summary(model_without_inter)
+
+# ---------------------------
+# LASSO Regression
+# ---------------------------
+set.seed(221)
+x_matrix <- as.matrix(data_with_scores[, c("t1bmi","race", paste0("Factor", 1:18),
+                                           "insurance","education","Cluster",
+                                           "phthalate_ers","phenol_ers","pah_ers","metal_ers")])
+y <- data_with_scores$Yhat
+
+lasso_model <- cv.glmnet(x_matrix, y, alpha = 1)
+best_lambda <- lasso_model$lambda.min
+plot(lasso_model)
+coef(lasso_model)
+
+selected_predictors <- which(coef(lasso_model) != 0)
+final_model <- lm(Yhat ~ 0 + ., data = data_with_scores[, c("Yhat", names(x_matrix)[selected_predictors[-1]])])
+summary(final_model)
+
+predicted_Yhat <- predict(final_model, newdata = data_with_scores[, names(x_matrix)[selected_predictors[-1]]])
